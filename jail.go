@@ -19,7 +19,9 @@ package jail
  */
 
 import (
+    /* "fmt" */
     "github.com/coopernurse/gorp"
+    "github.com/virtbsd/network"
 )
 
 type Jail struct {
@@ -29,8 +31,18 @@ type Jail struct {
     Options map[string]string `db:"-"`
     CreateDate int
     ModificationDate int
+    NetworkDevices []network.NetworkDevice `db:"-"`
 
     Dirty bool `db:"-"`
+}
+
+func (jail *Jail) PostGet(s gorp.SqlExecutor) error {
+    jail.NetworkDevices = network.GetNetworkDevices(map[string]interface{}{"sqlexecutor": s}, *jail)
+    return nil
+}
+
+func (jail Jail) GetUUID() string {
+    return jail.UUID
 }
 
 func LookupUUID(db *gorp.DbMap, field map[string]interface{}) string {
@@ -127,6 +139,6 @@ func (jail Jail) Delete() error {
     return nil
 }
 
-func Archive(archivename string) error {
+func (jail Jail) Archive(archivename string) error {
     return nil
 }
