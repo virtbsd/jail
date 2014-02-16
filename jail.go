@@ -31,7 +31,8 @@ type Jail struct {
     Options map[string]string `db:"-"`
     CreateDate int
     ModificationDate int
-    NetworkDevices []network.NetworkDevice `db:"-"`
+    ZFSDataset string
+    NetworkDevices []*network.NetworkDevice `db:"-"`
 
     Dirty bool `db:"-"`
 }
