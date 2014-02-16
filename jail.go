@@ -24,21 +24,43 @@ import (
     "github.com/virtbsd/network"
 )
 
+type MountPoint struct {
+    JailUUID string
+    Source string
+    Destination string
+    Options string
+    MountOrder int
+}
+
+type JailOption struct {
+    JailUUID string
+    OptionKey string
+    OptionValue string
+}
+
 type Jail struct {
     UUID string
     Name string
     HostName string
-    Options map[string]string `db:"-"`
     CreateDate int
     ModificationDate int
     ZFSDataset string
+
     NetworkDevices []*network.NetworkDevice `db:"-"`
+    Mounts []*MountPoint `db:"-"`
+    Options []*JailOption `db:"-"`
+    BootEnvironments map[string]bool `db:"-"`
+    Snapshots []string `db:"-"`
 
     Dirty bool `db:"-"`
 }
 
 func (jail *Jail) PostGet(s gorp.SqlExecutor) error {
     jail.NetworkDevices = network.GetNetworkDevices(map[string]interface{}{"sqlexecutor": s}, *jail)
+
+    s.Select(&jail.Mounts, "select * from MountPoint where JailUUID = ?", jail.UUID)
+    s.Select(&jail.Options, "select * from JailOption where JailUUID = ?", jail.UUID)
+
     return nil
 }
 
