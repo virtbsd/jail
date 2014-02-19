@@ -20,8 +20,11 @@ package jail
 
 import (
     /* "fmt" */
+    "github.com/nu7hatch/gouuid"
     "github.com/coopernurse/gorp"
     "github.com/virtbsd/network"
+    "github.com/virtbsd/VirtualMachine"
+    "github.com/virtbsd/zfs"
 )
 
 type MountPoint struct {
@@ -51,25 +54,33 @@ type Jail struct {
     Options []*JailOption `db:"-"`
     BootEnvironments map[string]bool `db:"-"`
     Snapshots []string `db:"-"`
+    ZFSDatasetObj *zfs.Dataset `db:"-"`
 
+    Path string `db:"-"`
     Dirty bool `db:"-"`
 }
 
 func (jail *Jail) PostGet(s gorp.SqlExecutor) error {
-    jail.NetworkDevices = network.GetNetworkDevices(map[string]interface{}{"sqlexecutor": s}, *jail)
+    jail.NetworkDevices = network.GetNetworkDevices(map[string]interface{}{"sqlexecutor": s}, jail)
 
     s.Select(&jail.Mounts, "select * from MountPoint where JailUUID = ?", jail.UUID)
     s.Select(&jail.Options, "select * from JailOption where JailUUID = ?", jail.UUID)
+    if len(jail.HostName) == 0 {
+        jail.HostName = jail.Name
+    }
+
+    jail.ZFSDatasetObj = zfs.GetDataset(jail.ZFSDataset)
 
     return nil
 }
 
-func (jail Jail) GetUUID() string {
+func (jail *Jail) GetUUID() string {
     return jail.UUID
 }
 
 func LookupUUID(db *gorp.DbMap, field map[string]interface{}) string {
-fields := []string{ "name", "hostname" }
+    fields := []string{ "name", "hostname" }
+
     if uuid, ok := field["uuid"]; ok == true {
         return uuid.(string)
     }
@@ -106,62 +117,100 @@ func GetJail(db *gorp.DbMap, field map[string]interface{}) *Jail {
     return obj.(*Jail)
 }
 
-func (jail Jail) Start() error {
+func (jail *Jail) Start() error {
+    if jail.IsOnline() == false {
+        return nil
+    }
+
     return nil
 }
 
-func (jail Jail) Stop() error {
+func (jail *Jail) Stop() error {
     return nil
 }
 
-func (jail Jail) Status() string {
+func (jail *Jail) Status() string {
+    if jail.IsOnline() {
+        return "Online"
+    } else {
+        return "Offline"
+    }
+}
+
+func (jail *Jail) CreateSnapshot(snapname string) error {
+    return nil
+}
+
+func (jail *Jail) RestoreSnapshot(snapname string) error {
+    return nil
+}
+
+func (jail *Jail) DeleteSnapshot(snapname string) error {
+    return nil
+}
+
+func (jail *Jail) PrepareHostNetworking() error {
+    return nil
+}
+
+func (jail *Jail) PrepareGuestNetworking() error {
+    return nil
+}
+
+func (jail *Jail) NetworkingStatus() string {
     return ""
 }
 
-func (jail Jail) CreateSnapshot(snapname string) error {
-    return nil
+func (jail *Jail) GetPath() string {
+    if len(jail.Path) > 0 {
+        return jail.Path
+    }
+
+    path, err := zfs.GetDatasetPath(jail.ZFSDataset)
+    if err != nil {
+        panic(err)
+        return ""
+    }
+
+    jail.Path = path
+
+    return path
 }
 
-func (jail Jail) RestoreSnapshot(snapname string) error {
-    return nil
-}
-
-func (jail Jail) DeleteSnapshot(snapname string) error {
-    return nil
-}
-
-func (jail Jail) PrepareHostNetworking() error {
-    return nil
-}
-
-func (jail Jail) PrepareGuestNetworking() error {
-    return nil
-}
-
-func (jail Jail) NetworkingStatus() string {
-    return ""
-}
-
-func (jail Jail) GetPath() string {
-    return ""
-}
-
-func (jail Jail) IsOnline() bool {
+func (jail *Jail) IsOnline() bool {
     return false
 }
 
-func (jail Jail) Validate() error {
+func (jail *Jail) Validate() error {
+    if len(jail.UUID) == 0 {
+        /* If we haven't been persisted (this is a new jail), then we don't have a UUID */
+        myuuid, _ := uuid.NewV4()
+        jail.UUID = myuuid.String()
+    }
+
+    if _, err := uuid.ParseHex(jail.UUID); err != nil {
+        return VirtualMachine.VirtualMachineError{"Invalid UUID", jail}
+    }
+
+    if len(jail.GetPath()) == 0 {
+        return VirtualMachine.VirtualMachineError{"Invalid Path, ZFS Dataset: " + jail.ZFSDataset, jail}
+    }
+
     return nil
 }
 
-func (jail Jail) Persist() error {
+func (jail *Jail) Persist(db *gorp.DbMap) error {
+    if err := jail.Validate(); err != nil {
+        return err
+    }
+
     return nil
 }
 
-func (jail Jail) Delete() error {
+func (jail *Jail) Delete(db *gorp.DbMap) error {
     return nil
 }
 
-func (jail Jail) Archive(archivename string) error {
+func (jail *Jail) Archive(archivename string) error {
     return nil
 }
