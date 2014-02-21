@@ -32,6 +32,7 @@ import (
 )
 
 type MountPoint struct {
+    MountPointID int
     JailUUID string
     Source string
     Destination string
@@ -41,6 +42,7 @@ type MountPoint struct {
 }
 
 type JailOption struct {
+    OptionID int
     JailUUID string
     OptionKey string
     OptionValue string
@@ -59,7 +61,7 @@ type Jail struct {
     Options []*JailOption `db:"-"`
     BootEnvironments map[string]bool `db:"-"`
     Snapshots []string `db:"-"`
-    ZFSDatasetObj *zfs.Dataset `db:"-"`
+    ZFSDatasetObj *zfs.Dataset `db:"-" json:"-"`
     Routes []*network.Route `db:"-"`
 
     Path string `db:"-"`
@@ -335,6 +337,28 @@ func (jail *Jail) Validate() error {
 func (jail *Jail) Persist(db *gorp.DbMap) error {
     if err := jail.Validate(); err != nil {
         return err
+    }
+
+    for _, device := range jail.NetworkDevices {
+        if err := device.Persist(db, jail); err != nil {
+            return err
+        }
+    }
+
+    for _, mount := range jail.Mounts {
+        if mount.MountPointID == 0 {
+            db.Insert(mount)
+        } else {
+            db.Update(mount)
+        }
+    }
+
+    for _, option := range jail.Options {
+        if option.OptionID == 0 {
+            db.Insert(option)
+        } else {
+            db.Update(option)
+        }
     }
 
     return nil
