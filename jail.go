@@ -19,13 +19,16 @@ package jail
  */
 
 import (
-    /* "fmt" */
+    "strings"
+    "strconv"
+    "fmt"
     "os/exec"
     "github.com/nu7hatch/gouuid"
     "github.com/coopernurse/gorp"
     "github.com/virtbsd/network"
     "github.com/virtbsd/VirtualMachine"
     "github.com/virtbsd/zfs"
+    "github.com/virtbsd/util"
 )
 
 type MountPoint struct {
@@ -73,7 +76,20 @@ func (jail *Jail) PostGet(s gorp.SqlExecutor) error {
         jail.HostName = jail.Name
     }
 
+    jail.BootEnvironments = make(map[string]bool)
+
     jail.ZFSDatasetObj = zfs.GetDataset(jail.ZFSDataset)
+    for _, rootDataset := range jail.ZFSDatasetObj.Children {
+        if strings.HasPrefix(rootDataset.DatasetPath, jail.ZFSDataset + "/ROOT") {
+            for _, dataset := range rootDataset.Children {
+                if _, ok := dataset.Options["jailadmin:be_active"]; ok == true {
+                    jail.BootEnvironments[dataset.DatasetPath], _ = strconv.ParseBool(dataset.Options["jailadmin:be_active"])
+                }
+            }
+
+            break
+        }
+    }
 
     return nil
 }
@@ -122,20 +138,33 @@ func GetJail(db *gorp.DbMap, field map[string]interface{}) *Jail {
 }
 
 func (jail *Jail) Start() error {
-    path := jail.GetPath()
+    path, err := jail.GetPath()
+    if err != nil {
+        return err
+    }
 
     if jail.IsOnline() == true {
         return nil
     }
 
     cmd := exec.Command("/sbin/mount", "-t", "devfs", "devfs", path + "/dev")
-    if err := cmd.Run(); err != nil {
+    if rawoutput, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("Error mount devfs in jail: %s", virtbsdutil.ByteToString(rawoutput))
         return err
     }
 
     cmd = exec.Command("/usr/sbin/jail", "-c", "vnet", "name=" + jail.UUID, "host.hostname=" + jail.HostName, "path=" + path, "persist")
-    if err := cmd.Run(); err != nil {
-        return err
+    for i := range jail.Options {
+        opt := jail.Options[i].OptionKey
+        if len(jail.Options[i].OptionValue) > 0 {
+            opt += jail.Options[i].OptionValue
+        }
+
+        cmd.Args = append(cmd.Args, opt)
+    }
+
+    if rawoutput, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("Error starting jail: %s", virtbsdutil.ByteToString(rawoutput))
     }
 
     for i := range jail.Mounts {
@@ -153,8 +182,8 @@ func (jail *Jail) Start() error {
         cmd.Args = append(cmd.Args, jail.Mounts[i].Source)
         cmd.Args = append(cmd.Args, path + "/" + jail.Mounts[i].Destination)
 
-        if err := cmd.Run(); err != nil {
-            return err
+        if rawoutput, err := cmd.CombinedOutput(); err != nil {
+            return fmt.Errorf("Error mounting %s: %s", jail.Mounts[i].Destination, virtbsdutil.ByteToString(rawoutput))
         }
     }
 
@@ -162,6 +191,38 @@ func (jail *Jail) Start() error {
 }
 
 func (jail *Jail) Stop() error {
+    path, err := jail.GetPath()
+    if err != nil {
+        return err
+    }
+
+    if jail.IsOnline() == false {
+        return nil
+    }
+
+    cmd := exec.Command("/usr/sbin/jail", "-r", jail.UUID)
+    if err := cmd.Run(); err != nil {
+        return nil
+    }
+
+    for i := range jail.Mounts {
+        cmd = exec.Command("/sbin/umount", path + "/" + jail.Mounts[i].Destination)
+        if rawoutput, err := cmd.CombinedOutput(); err != nil {
+            return fmt.Errorf("/sbin/unmount %s/%s: %s", path, jail.Mounts[i].Destination, virtbsdutil.ByteToString(rawoutput))
+        }
+    }
+
+    for i := range jail.NetworkDevices {
+        if err := jail.NetworkDevices[i].BringOffline(); err != nil {
+            return err
+        }
+    }
+
+    cmd = exec.Command("/sbin/umount", path + "/dev")
+    if rawoutput, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("/sbin/unmount %s/dev: %s\n", path, virtbsdutil.ByteToString(rawoutput))
+    }
+
     return nil
 }
 
@@ -214,20 +275,33 @@ func (jail *Jail) NetworkingStatus() string {
     return ""
 }
 
-func (jail *Jail) GetPath() string {
+func (jail *Jail) GetPath() (string, error) {
     if len(jail.Path) > 0 {
-        return jail.Path
+        return jail.Path, nil
+    }
+
+    if len(jail.BootEnvironments) > 0 {
+        for k, v := range jail.BootEnvironments {
+            if v == true {
+                path, err := zfs.GetDatasetPath(k)
+                if err == nil && len(path) > 0 {
+                    jail.Path = path
+                    return path, nil
+                }
+            }
+        }
+
+        return "", fmt.Errorf("Boot environments enabled. No active boot environment found.")
     }
 
     path, err := zfs.GetDatasetPath(jail.ZFSDataset)
     if err != nil {
-        panic(err)
-        return ""
+        return "", err
     }
 
     jail.Path = path
 
-    return path
+    return path, nil
 }
 
 func (jail *Jail) IsOnline() bool {
@@ -251,7 +325,7 @@ func (jail *Jail) Validate() error {
         return VirtualMachine.VirtualMachineError{"Invalid UUID", jail}
     }
 
-    if len(jail.GetPath()) == 0 {
+    if path, err := jail.GetPath(); err != nil || len(path) == 0 {
         return VirtualMachine.VirtualMachineError{"Invalid Path, ZFS Dataset: " + jail.ZFSDataset, jail}
     }
 
