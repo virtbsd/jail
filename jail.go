@@ -23,6 +23,7 @@ import (
     "strconv"
     "fmt"
     "os/exec"
+    "encoding/json"
     "github.com/nu7hatch/gouuid"
     "github.com/coopernurse/gorp"
     "github.com/virtbsd/network"
@@ -66,6 +67,18 @@ type Jail struct {
 
     Path string `db:"-"`
     Dirty bool `db:"-"`
+}
+
+type JailJSON struct {
+    UUID string
+    Name string
+    HostName string
+    ZFSDataset string
+    Path string
+    Status string
+
+    NetworkDevices []*network.NetworkDevice
+    BootEnvironments map[string]bool
 }
 
 func (jail *Jail) PostGet(s gorp.SqlExecutor) error {
@@ -137,6 +150,21 @@ func GetJail(db *gorp.DbMap, field map[string]interface{}) *Jail {
     }
 
     return obj.(*Jail)
+}
+
+func GetAllJails(db *gorp.DbMap) []*Jail {
+    var uuids []string
+    var jails []*Jail
+
+    if _, err := db.Select(&uuids, "select UUID from Jail"); err != nil {
+        return nil
+    }
+
+    for _, uuid := range uuids {
+        jails = append(jails, GetJail(db, map[string]interface{} {"uuid": uuid}))
+    }
+
+    return jails
 }
 
 func (jail *Jail) Start() error {
@@ -370,4 +398,19 @@ func (jail *Jail) Delete(db *gorp.DbMap) error {
 
 func (jail *Jail) Archive(archivename string) error {
     return nil
+}
+
+func (jail *Jail) MarshalJSON() ([]byte, error) {
+    obj := JailJSON{}
+    obj.UUID = jail.UUID
+    obj.Name = jail.Name
+    obj.HostName = jail.HostName
+    obj.ZFSDataset = jail.ZFSDataset
+    obj.Path, _ = jail.GetPath()
+    obj.Status = jail.Status()
+    obj.NetworkDevices = jail.NetworkDevices
+    obj.BootEnvironments = jail.BootEnvironments
+
+    bytes, err := json.MarshalIndent(obj, "", "    ")
+    return bytes, err
 }
