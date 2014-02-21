@@ -20,6 +20,7 @@ package jail
 
 import (
     /* "fmt" */
+    "os/exec"
     "github.com/nu7hatch/gouuid"
     "github.com/coopernurse/gorp"
     "github.com/virtbsd/network"
@@ -32,6 +33,7 @@ type MountPoint struct {
     Source string
     Destination string
     Options string
+    Driver string
     MountOrder int
 }
 
@@ -55,6 +57,7 @@ type Jail struct {
     BootEnvironments map[string]bool `db:"-"`
     Snapshots []string `db:"-"`
     ZFSDatasetObj *zfs.Dataset `db:"-"`
+    Routes []*network.Route `db:"-"`
 
     Path string `db:"-"`
     Dirty bool `db:"-"`
@@ -63,8 +66,9 @@ type Jail struct {
 func (jail *Jail) PostGet(s gorp.SqlExecutor) error {
     jail.NetworkDevices = network.GetNetworkDevices(map[string]interface{}{"sqlexecutor": s}, jail)
 
-    s.Select(&jail.Mounts, "select * from MountPoint where JailUUID = ?", jail.UUID)
+    s.Select(&jail.Mounts, "select * from MountPoint where JailUUID = ? order by MountOrder", jail.UUID)
     s.Select(&jail.Options, "select * from JailOption where JailUUID = ?", jail.UUID)
+    s.Select(&jail.Routes, "select * from Route WHERE VmUUID = ?", jail.UUID)
     if len(jail.HostName) == 0 {
         jail.HostName = jail.Name
     }
@@ -118,8 +122,40 @@ func GetJail(db *gorp.DbMap, field map[string]interface{}) *Jail {
 }
 
 func (jail *Jail) Start() error {
-    if jail.IsOnline() == false {
+    path := jail.GetPath()
+
+    if jail.IsOnline() == true {
         return nil
+    }
+
+    cmd := exec.Command("/sbin/mount", "-t", "devfs", "devfs", path + "/dev")
+    if err := cmd.Run(); err != nil {
+        return err
+    }
+
+    cmd = exec.Command("/usr/sbin/jail", "-c", "vnet", "name=" + jail.UUID, "host.hostname=" + jail.HostName, "path=" + path, "persist")
+    if err := cmd.Run(); err != nil {
+        return err
+    }
+
+    for i := range jail.Mounts {
+        cmd = exec.Command("/usr/sbin/jexec", jail.UUID, "/sbin/mount")
+        if len(jail.Mounts[i].Driver) > 0 {
+            cmd.Args = append(cmd.Args, "-t")
+            cmd.Args = append(cmd.Args, jail.Mounts[i].Driver)
+        }
+
+        if len(jail.Mounts[i].Options) > 0 {
+            cmd.Args = append(cmd.Args, "-o")
+            cmd.Args = append(cmd.Args, jail.Mounts[i].Options)
+        }
+
+        cmd.Args = append(cmd.Args, jail.Mounts[i].Source)
+        cmd.Args = append(cmd.Args, path + "/" + jail.Mounts[i].Destination)
+
+        if err := cmd.Run(); err != nil {
+            return err
+        }
     }
 
     return nil
@@ -150,10 +186,27 @@ func (jail *Jail) DeleteSnapshot(snapname string) error {
 }
 
 func (jail *Jail) PrepareHostNetworking() error {
+    for i := range jail.NetworkDevices {
+        if err := jail.NetworkDevices[i].BringHostOnline(); err != nil {
+            return err
+        }
+    }
+
     return nil
 }
 
 func (jail *Jail) PrepareGuestNetworking() error {
+    for i := range jail.NetworkDevices {
+        if err := jail.NetworkDevices[i].BringGuestOnline(jail); err != nil {
+            return err
+        }
+    }
+
+    cmd := exec.Command("/usr/sbin/jexec", jail.UUID, "/sbin/ifconfig", "lo0", "inet", "127.0.0.1", "up")
+    if err := cmd.Run(); err != nil {
+        return err
+    }
+
     return nil
 }
 
@@ -178,6 +231,12 @@ func (jail *Jail) GetPath() string {
 }
 
 func (jail *Jail) IsOnline() bool {
+    cmd := exec.Command("/usr/sbin/jls", "-j", jail.UUID)
+    err := cmd.Run()
+    if err == nil {
+        return true
+    }
+
     return false
 }
 
