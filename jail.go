@@ -78,6 +78,7 @@ type JailJSON struct {
     Status string
 
     NetworkDevices []*network.NetworkDevice
+    Routes []*network.Route
     BootEnvironments map[string]bool
 }
 
@@ -305,13 +306,13 @@ func (jail *Jail) PrepareGuestNetworking() error {
 
     for _, route := range jail.Routes {
         proto := "-inet"
-        if strings.Index(route.Source, ":") >= 0 {
+        if strings.Index(route.Destination, ":") >= 0 {
             proto = "-inet6"
         }
 
-        cmd = exec.Command("/usr/bin/jexec", jail.UUID, "/sbin/route", "add", proto, route.Source, route.Destination)
+        cmd = exec.Command("/usr/sbin/jexec", jail.UUID, "/sbin/route", "add", proto, route.Source, route.Destination)
         if rawoutput, err := cmd.CombinedOutput(); err != nil {
-            return fmt.Errorf("Adding route for [%s] to [%s] failed: %s", route.Source, route.Destination, virtbsdutil.ByteToString(rawoutput))
+            return fmt.Errorf("Adding route for [%s] to [%s] failed: (%s) %s", route.Source, route.Destination, err.Error(), virtbsdutil.ByteToString(rawoutput))
         }
     }
 
@@ -323,16 +324,14 @@ func (jail *Jail) PostStart() error {
     for _, device := range jail.NetworkDevices {
         has_ipv6 := false
         for _, address := range device.Addresses {
-            if strings.Index(address, ":")  >= 0 {
+            if strings.Index(address.Address, ":")  >= 0 {
                 has_ipv6 = true
             }
         }
 
         if has_ipv6 {
-            cmd := exec.Command("/usr/bin/jexec", jail.UUID, "/sbin/ifconfig", "epair" + strconv.Itoa(device.DeviceID) + "b", "inet6", "-ifdisabled")
-            if rawoutput, err := cmd.CombinedOutput(); err != nil {
-                return fmt.Errorf("Could not enable IPv6 for epair%db: %s", device.DeviceID, virtbsdutil.ByteToString(rawoutput))
-            }
+            cmd := exec.Command("/usr/sbin/jexec", jail.UUID, "/sbin/ifconfig", "epair" + strconv.Itoa(device.DeviceID) + "b", "inet6", "-ifdisabled")
+            cmd.Run()
         }
     }
 
@@ -448,6 +447,7 @@ func (jail *Jail) MarshalJSON() ([]byte, error) {
     obj.Status = jail.Status()
     obj.NetworkDevices = jail.NetworkDevices
     obj.BootEnvironments = jail.BootEnvironments
+    obj.Routes = jail.Routes
 
     bytes, err := json.MarshalIndent(obj, "", "    ")
     return bytes, err
