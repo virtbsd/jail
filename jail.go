@@ -79,6 +79,7 @@ type JailJSON struct {
 
     NetworkDevices []*network.NetworkDevice
     Routes []*network.Route
+    Options []*JailOption
     BootEnvironments map[string]bool
 }
 
@@ -180,8 +181,8 @@ func (jail *Jail) Start() error {
 
     cmd := exec.Command("/sbin/mount", "-t", "devfs", "devfs", path + "/dev")
     if rawoutput, err := cmd.CombinedOutput(); err != nil {
+        jail.ForceStop()
         return fmt.Errorf("Error mount devfs in jail: %s", virtbsdutil.ByteToString(rawoutput))
-        return err
     }
 
     cmd = exec.Command("/usr/sbin/jail", "-c", "vnet", "name=" + jail.UUID, "host.hostname=" + jail.HostName, "path=" + path, "persist")
@@ -195,6 +196,7 @@ func (jail *Jail) Start() error {
     }
 
     if rawoutput, err := cmd.CombinedOutput(); err != nil {
+        jail.ForceStop()
         return fmt.Errorf("Error starting jail: %s", virtbsdutil.ByteToString(rawoutput))
     }
 
@@ -214,16 +216,39 @@ func (jail *Jail) Start() error {
         cmd.Args = append(cmd.Args, path + "/" + jail.Mounts[i].Destination)
 
         if rawoutput, err := cmd.CombinedOutput(); err != nil {
+            jail.ForceStop()
             return fmt.Errorf("Error mounting %s: %s", jail.Mounts[i].Destination, virtbsdutil.ByteToString(rawoutput))
         }
     }
 
     cmd = exec.Command("/usr/sbin/jexec", jail.UUID, "/bin/sh", "/etc/rc")
     if rawoutput, err := cmd.CombinedOutput(); err != nil {
+        jail.ForceStop()
         return fmt.Errorf("Error running /etc/rc: %s", virtbsdutil.ByteToString(rawoutput))
     }
 
     return nil
+}
+
+func (jail *Jail) ForceStop() {
+    path, _ := jail.GetPath()
+
+    cmd := exec.Command("/usr/sbin/jail", "-r", jail.UUID)
+    cmd.Run()
+
+    if len(path) > 0 {
+        for _, mount := range jail.Mounts {
+            cmd = exec.Command("/sbin/umount", "-f", path + "/" + mount.Destination)
+            cmd.Run()
+        }
+
+        cmd = exec.Command("/sbin/umount", "-f", path + "/dev")
+        cmd.Run()
+    }
+
+    for _, device := range jail.NetworkDevices {
+        device.BringOffline()
+    }
 }
 
 func (jail *Jail) Stop() error {
@@ -285,6 +310,7 @@ func (jail *Jail) DeleteSnapshot(snapname string) error {
 func (jail *Jail) PrepareHostNetworking() error {
     for i := range jail.NetworkDevices {
         if err := jail.NetworkDevices[i].BringHostOnline(); err != nil {
+            jail.ForceStop()
             return err
         }
     }
@@ -295,12 +321,14 @@ func (jail *Jail) PrepareHostNetworking() error {
 func (jail *Jail) PrepareGuestNetworking() error {
     for i := range jail.NetworkDevices {
         if err := jail.NetworkDevices[i].BringGuestOnline(jail); err != nil {
+            jail.ForceStop()
             return err
         }
     }
 
     cmd := exec.Command("/usr/sbin/jexec", jail.UUID, "/sbin/ifconfig", "lo0", "inet", "127.0.0.1", "up")
     if err := cmd.Run(); err != nil {
+        jail.ForceStop()
         return err
     }
 
@@ -312,6 +340,7 @@ func (jail *Jail) PrepareGuestNetworking() error {
 
         cmd = exec.Command("/usr/sbin/jexec", jail.UUID, "/sbin/route", "add", proto, route.Source, route.Destination)
         if rawoutput, err := cmd.CombinedOutput(); err != nil {
+            jail.ForceStop()
             return fmt.Errorf("Adding route for [%s] to [%s] failed: (%s) %s", route.Source, route.Destination, err.Error(), virtbsdutil.ByteToString(rawoutput))
         }
     }
@@ -400,11 +429,30 @@ func (jail *Jail) Validate() error {
 }
 
 func (jail *Jail) Persist(db *gorp.DbMap) error {
+    insert := false
+
+    if len(jail.UUID) == 0 {
+    insert = true
+        count := 0
+
+        db.Select(&count, "select count(UUID) from Jail where Name = ?", jail.Name)
+        if count > 0 {
+            return fmt.Errorf("Jail with name %s already exists", jail.Name)
+        }
+    }
+
     if err := jail.Validate(); err != nil {
         return err
     }
 
+    if insert {
+        db.Insert(jail)
+    } else {
+        db.Update(jail)
+    }
+
     for _, device := range jail.NetworkDevices {
+        device.VmUUID = jail.UUID
         if err := device.Persist(db, jail); err != nil {
             return err
         }
@@ -412,6 +460,7 @@ func (jail *Jail) Persist(db *gorp.DbMap) error {
 
     for _, mount := range jail.Mounts {
         if mount.MountPointID == 0 {
+            mount.JailUUID = jail.UUID
             db.Insert(mount)
         } else {
             db.Update(mount)
@@ -420,9 +469,19 @@ func (jail *Jail) Persist(db *gorp.DbMap) error {
 
     for _, option := range jail.Options {
         if option.OptionID == 0 {
+            option.JailUUID = jail.UUID
             db.Insert(option)
         } else {
             db.Update(option)
+        }
+    }
+
+    for _, route := range jail.Routes {
+        if route.RouteID == 0 {
+            route.VmUUID = jail.UUID
+            db.Insert(route)
+        } else {
+            db.Update(route)
         }
     }
 
@@ -430,6 +489,28 @@ func (jail *Jail) Persist(db *gorp.DbMap) error {
 }
 
 func (jail *Jail) Delete(db *gorp.DbMap) error {
+    if len(jail.UUID) == 0 {
+        /* No UUID means we haven't even persisted to the DB, yet */
+        return nil
+    }
+
+    for _, device := range jail.NetworkDevices {
+        device.Delete(db)
+    }
+
+    for _, option := range jail.Options {
+        db.Delete(option)
+    }
+
+    for _, mount := range jail.Mounts {
+        db.Delete(mount)
+    }
+
+    for _, route := range jail.Routes {
+        db.Delete(route)
+    }
+
+    db.Delete(jail)
     return nil
 }
 
@@ -448,6 +529,7 @@ func (jail *Jail) MarshalJSON() ([]byte, error) {
     obj.NetworkDevices = jail.NetworkDevices
     obj.BootEnvironments = jail.BootEnvironments
     obj.Routes = jail.Routes
+    obj.Options = jail.Options
 
     bytes, err := json.MarshalIndent(obj, "", "    ")
     return bytes, err
